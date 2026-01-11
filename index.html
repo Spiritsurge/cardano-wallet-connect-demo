@@ -1,0 +1,299 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Cardano Wallet Connect Demo</title>
+    <style>
+      body {
+        font-family: system-ui, -apple-system, "Segoe UI", Roboto,
+          "Helvetica Neue", Arial;
+        padding: 28px;
+        background: #f7f9fc;
+        color: #0b1220;
+      }
+      .card {
+        background: white;
+        border-radius: 12px;
+        padding: 18px;
+        box-shadow: 0 6px 20px rgba(8, 15, 30, 0.06);
+        max-width: 720px;
+        margin: auto;
+      }
+      h1 {
+        margin: 0 0 8px 0;
+        font-size: 20px;
+      }
+      p.lead {
+        margin: 0 0 18px 0;
+        color: #394b63;
+      }
+      .wallet-list {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+        margin-bottom: 14px;
+      }
+      button {
+        border: 0;
+        padding: 10px 12px;
+        border-radius: 8px;
+        cursor: pointer;
+        background: #0b69ff;
+        color: white;
+        font-weight: 600;
+      }
+      button.secondary {
+        background: transparent;
+        border: 1px solid #d6e1ff;
+        color: #0b69ff;
+        font-weight: 600;
+      }
+      .info {
+        margin-top: 12px;
+        background: #f2f8ff;
+        padding: 12px;
+        border-radius: 8px;
+        color: #0b4bd8;
+        font-size: 14px;
+      }
+      .status {
+        margin-top: 12px;
+        font-size: 14px;
+      }
+      pre {
+        background: #0b12201a;
+        padding: 10px;
+        border-radius: 8px;
+        overflow: auto;
+      }
+      .meta {
+        color: #556;
+        font-size: 13px;
+      }
+    </style>
+
+    <!-- Cardano Serialization Lib (browser build) -->
+    <!-- Using CDN for the browser-friendly build from Emurgo. In production pin the version and host yourself. -->
+    <script src="https://cdn.jsdelivr.net/npm/@emurgo/cardano-serialization-lib-browser@11.0.4/cardano_serialization_lib.min.js"></script>
+  </head>
+  <body>
+    <div class="card">
+      <h1>Cardano Wallet Connect — Demo</h1>
+      <p class="lead">
+        Detects installed CIP-30 wallets and lets you connect. Works with Nami,
+        Eternl, Flint and other CIP-30 wallets.
+      </p>
+
+      <div id="wallets" class="wallet-list">
+        <!-- Buttons for detected wallets will be injected here -->
+      </div>
+
+      <div>
+        <button id="refreshBtn" class="secondary">Refresh wallets</button>
+        <button id="disconnectBtn" class="secondary" style="display: none">
+          Disconnect
+        </button>
+      </div>
+
+      <div class="status" id="status">
+        Status: <strong id="statusText">idle</strong>
+      </div>
+
+      <div class="info" id="infoBox" style="display: none">
+        <div>
+          <strong>Connected wallet:</strong> <span id="walletName"></span>
+        </div>
+        <div style="margin-top: 8px">
+          <strong>First used address (bech32):</strong>
+        </div>
+        <pre id="bech32Address" style="margin-top: 6px">—</pre>
+        <div class="meta" id="extraMeta"></div>
+      </div>
+
+      <p style="margin-top: 12px; font-size: 13px; color: #5b6b7f">
+        This demo uses the CIP-30 dApp API (window.cardano). It only requests
+        `enable()` and `getUsedAddresses()` — no funds movement.
+      </p>
+    </div>
+
+    <script>
+      // Helper: convert hex string to Uint8Array
+      function hexToBytes(hex) {
+        if (!hex) return new Uint8Array();
+        const clean = hex.startsWith("0x") ? hex.slice(2) : hex;
+        const len = clean.length / 2;
+        const out = new Uint8Array(len);
+        for (let i = 0; i < len; i++) {
+          out[i] = parseInt(clean.substr(i * 2, 2), 16);
+        }
+        return out;
+      }
+
+      // Small wrapper to safely access window.cardano
+      function getInjectedWallets() {
+        if (!window.cardano) return {};
+        // Some wallets expose window.cardano.nami etc; gather all keys except __proto__
+        const wallets = {};
+        for (const k of Object.keys(window.cardano)) {
+          if (k === "walletFound") continue;
+          wallets[k] = window.cardano[k];
+        }
+        return wallets;
+      }
+
+      // Render detected wallet buttons
+      async function renderWalletButtons() {
+        const container = document.getElementById("wallets");
+        container.innerHTML = "";
+        const wallets = getInjectedWallets();
+        if (Object.keys(wallets).length === 0) {
+          const noWallet = document.createElement("div");
+          noWallet.textContent =
+            "No Cardano wallets detected in this browser (open your wallet extension).";
+          noWallet.style.color = "#9aa8bf";
+          container.appendChild(noWallet);
+          return;
+        }
+
+        for (const id of Object.keys(wallets)) {
+          const w = wallets[id];
+          // Some wallet objects include a name property or icon
+          const name =
+            w && w.name ? w.name : id.charAt(0).toUpperCase() + id.slice(1);
+          const btn = document.createElement("button");
+          btn.textContent = "Connect " + name;
+          btn.onclick = () => connectWallet(id);
+          container.appendChild(btn);
+        }
+      }
+
+      // UI helpers
+      function setStatus(txt) {
+        document.getElementById("statusText").textContent = txt;
+      }
+      function showInfo(visible) {
+        document.getElementById("infoBox").style.display = visible
+          ? "block"
+          : "none";
+      }
+      function setBech32(addr) {
+        document.getElementById("bech32Address").textContent = addr || "—";
+      }
+
+      // Global connection handle (enable returns an API object)
+      let walletApi = null;
+      let connectedWalletId = null;
+      let provider = null;
+
+      // Connect to chosen wallet (id matches window.cardano[id])
+      async function connectWallet(id) {
+        try {
+          setStatus("connecting to " + id + "...");
+          const injected = window.cardano && window.cardano[id];
+          if (!injected)
+            throw new Error('Wallet "' + id + '" not found in window.cardano');
+
+          // Ask wallet for permission
+          // This prompts the wallet extension UI
+          provider = await injected.enable();
+          walletApi = provider;
+          connectedWalletId = id;
+
+          setStatus("connected: " + id);
+
+          // show UI
+          document.getElementById("walletName").textContent =
+            injected.name || id;
+          document.getElementById("disconnectBtn").style.display =
+            "inline-block";
+          showInfo(true);
+
+          // get some info: used addresses (hex), convert first to bech32
+          // Most wallets implement getUsedAddresses(); some also implement getChangeAddress() or getRewardAddresses()
+          // We'll try usedAddresses → convert with cardano-serialization-lib to bech32
+          let used = [];
+          if (walletApi.getUsedAddresses) {
+            used = await walletApi.getUsedAddresses();
+          } else if (walletApi.getChangeAddress) {
+            // fallback to change address (not ideal but better than nothing)
+            const ch = await walletApi.getChangeAddress();
+            if (ch) used = [ch];
+          } else {
+            // no address API available
+            setBech32("wallet does not expose address API (older wallet?)");
+            document.getElementById("extraMeta").textContent = "";
+            return;
+          }
+
+          if (!used || used.length === 0) {
+            setBech32("no used addresses returned");
+            document.getElementById("extraMeta").textContent = "";
+            return;
+          }
+
+          // Convert first address hex -> bech32 using cardano-serialization-lib
+          try {
+            // csl is provided by the cardano-serialization-lib browser bundle included above
+            const firstHex = used[0];
+            const bytes = hexToBytes(firstHex);
+            const addr =
+              window.CardanoSerializationLib.Address.from_bytes(bytes);
+            const bech = addr.to_bech32();
+            setBech32(bech);
+            document.getElementById("extraMeta").textContent =
+              "Address type: " +
+              addr.to_address().constructor.name +
+              "  (raw hex shown hidden)";
+          } catch (err) {
+            // conversion failure
+            console.warn("bech32 conversion error", err);
+            setBech32("could not convert address to bech32: " + err.message);
+          }
+        } catch (err) {
+          console.error("connect error", err);
+          setStatus("connection failed");
+          alert(
+            "Connection failed: " +
+              (err && err.message ? err.message : String(err))
+          );
+        }
+      }
+
+      // Disconnect (best-effort: many wallets don't have a "disconnect" method; we just drop provider reference)
+      async function disconnect() {
+        walletApi = null;
+        provider = null;
+        connectedWalletId = null;
+        setStatus("disconnected");
+        setBech32("—");
+        showInfo(false);
+        document.getElementById("disconnectBtn").style.display = "none";
+      }
+
+      // Wire up refresh and disconnect
+      document
+        .getElementById("refreshBtn")
+        .addEventListener("click", async () => {
+          await renderWalletButtons();
+          setStatus("wallet list refreshed");
+        });
+      document
+        .getElementById("disconnectBtn")
+        .addEventListener("click", async () => {
+          await disconnect();
+        });
+
+      // On load: list wallets
+      (async function init() {
+        setStatus("initializing...");
+        // Wait a tick — some wallets inject after load
+        await new Promise((r) => setTimeout(r, 300));
+        await renderWalletButtons();
+        setStatus("idle");
+        // Optional: listen for new wallet injection events if the wallet provides them.
+        // Many wallets set window.cardano.* synchronously; if not, user can click Refresh.
+      })();
+    </script>
+  </body>
+</html>
