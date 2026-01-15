@@ -38,7 +38,7 @@ This is intended as a **learning reference** and lightweight proof-of-concept.
 cardano-wallet-connect-demo/
 └── index.html
 
----
+--
 
 ## ▶️ How to Run
 
