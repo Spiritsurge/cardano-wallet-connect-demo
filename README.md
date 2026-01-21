@@ -50,7 +50,6 @@ cardano-wallet-connect-demo/
 
 > ⚠️ Some wallets require HTTPS. If detection fails, use Option 2.
 
----
 
 ### Option 2: Local dev server (recommended)
 
